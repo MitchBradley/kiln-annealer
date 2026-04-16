@@ -252,13 +252,11 @@ def getTemperature():
         degreesC = -1
     if temperature.data == 0:
         temperature_errors = temperature_errors + 1
-        if temperature_errors >= 5:
-            TC_no_interface()
-    elif (degreesC < 2):
-        print("Error", hex(temperature.data))
+        print("Temperature error")
     else:
+        temperature_errors = 0
         print(degreesF, degreesC)
-    if degreesC == 0:
+    if temperature_errors >= 5:
         msg = ""
         if temperature.noConnection:
             msg = "TC_not_connected"
@@ -272,25 +270,25 @@ def getTemperature():
             outpin.off()
             state = "Broken"
             notify("Broken-" + msg)
-            # blink(npred, npoff)
+            blink(npred, npoff)
     return sample_valid
 
 def TC_check_interface():
     data = 0
     for i in range(5):
         temperature.read()
+        temperature.checkErrors()
         data = data + temperature.data
     if data == 0:
+        # TC_no_interface does not return
         TC_no_interface()
-    global degreesC
-    getTemperature()
 
 def time_minutes():
     return time.ticks_ms()//60000
 
 def kiln_init():
     global outpin, statestart, state, above_target_count
-    TC_check_interface()
+    TC_check_interface()  # Stalls on error
     npred()
     print("Turning on outpin")
     outpin.on()

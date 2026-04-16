@@ -38,12 +38,12 @@ class MAX31855(object):
     def read_rj_Celsius(self):
         '''Reads SPI bus and returns current value of reference junction.'''
         self.read()
-        return self.data_to_rj_temperature()
+        return self.data_to_rj_temperature() if self.data != 0 else 0
 
     def read_rj_Fahrenheit(self):
         '''Reads SPI bus and returns current value of reference junction.'''
         self.read()
-        return self.data_to_rj_temperature() * 9.0/5.0 + 32
+        return self.data_to_rj_temperature() * 9.0/5.0 + 32 if self.data != 0 else 0
     
     delayus = 20
     
@@ -77,6 +77,7 @@ class MAX31855(object):
             self.shortToGround = (data_32 & 0x00000002) != 0      # SCG bit, D1
             self.shortToVCC = (data_32 & 0x00000004) != 0         # SCV bit, D2
             self.unknownError = not (self.noConnection | self.shortToGround | self.shortToVCC)    # Errk!
+            self.data = 0
         else:
             self.noConnection = self.shortToGround = self.shortToVCC = self.unknownError = False
 
