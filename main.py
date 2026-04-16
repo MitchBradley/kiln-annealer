@@ -18,6 +18,9 @@ try:
 except:
     pass
 
+holding_entry_confirmations = 3
+temperature_smoothing_alpha = 0.3
+
 from machine import Pin
 import neopixel
 np = neopixel.NeoPixel(Pin(8), 1)
@@ -66,6 +69,7 @@ outpin = Pin(7, Pin.OUT)
 outpin.off()
 
 import wifi_credentials as WiFi
+import gc
 import network, time
 import urequests as requests
 
@@ -105,8 +109,6 @@ temperature_feed_name = "annealingkiln.temperature"
 status_feed_name = "annealingkiln.status"
 import aio_credentials as AIO
 # import clicksend_credentials as ClickSend
-import gmail_credentials as gmail
-import umail
 
 pn = '8082818386'
 temperature_url = 'https://io.adafruit.com/api/v2/' + AIO.USERNAME + '/feeds/' + temperature_feed_name + '/data'
@@ -136,10 +138,13 @@ status_url = 'https://io.adafruit.com/api/v2/' + AIO.USERNAME + '/feeds/' + stat
 #     except Exception as e:
 #         print("SendSMS", e)
 
-sender_email = gmail.USERNAME
-sender_key = gmail.KEY
-recipient_email = pn + "@tmomail.net"
 def sendSMS(msg):
+    import gmail_credentials as gmail
+    sender_email = gmail.USERNAME
+    sender_key = gmail.KEY
+    recipient_email = pn + "@tmomail.net"
+
+    import umail
     smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True) # Gmail's SSL port
     smtp.login(sender_email, sender_key)
     smtp.to(recipient_email)
@@ -175,11 +180,21 @@ def aioStatus(state):
             print("aioStatus", e)
 
 state = "Heating"
+last_reported_status = None
 
 statestart = 0
 
+def current_status():
+    return state
+
+def publish_status(status):
+    global last_reported_status
+    if status != last_reported_status:
+        aioStatus(status)
+        last_reported_status = status
+
 def notify(state):
-    aioStatus(state)
+    publish_status(state)
     sendSMS(state)
     print('The kiln is', state)
 
@@ -204,9 +219,13 @@ def log_to_aio():
             gc.collect()
 
 temperature_errors = 0
+above_target_count = 0
+last_good_temperature_c = None
+last_temperature_ms = None
+smoothed_temperature_c = None
 
 def TC_no_interface():
-    global outpin
+    global outpin, state
     outpin.off()
     state = "Broken"
     notify("Broken-No_TC_Interface")
@@ -214,9 +233,20 @@ def TC_no_interface():
 
 def getTemperature():
     global degreesC, degreesF, state, temperature_errors, outpin
+    global smoothed_temperature_c
+    sample_valid = False
     try:
-        degreesF = round(temperature.readFahrenheit())
-        degreesC = round(temperature.readCelsius())
+        raw_degreesC = temperature.readCelsius()
+        if smoothed_temperature_c is None:
+            smoothed_temperature_c = raw_degreesC
+        else:
+            smoothed_temperature_c = (
+                temperature_smoothing_alpha * raw_degreesC +
+                (1.0 - temperature_smoothing_alpha) * smoothed_temperature_c
+            )
+        degreesC = round(smoothed_temperature_c)
+        degreesF = round(degreesC * 9.0/5.0 + 32)
+        sample_valid = True
     except:
         degreesF = -1
         degreesC = -1
@@ -242,7 +272,8 @@ def getTemperature():
             outpin.off()
             state = "Broken"
             notify("Broken-" + msg)
-            blink(npred, npoff)
+            # blink(npred, npoff)
+    return sample_valid
 
 def TC_check_interface():
     data = 0
@@ -258,30 +289,39 @@ def time_minutes():
     return time.ticks_ms()//60000
 
 def kiln_init():
-    global outpin,statestart
+    global outpin, statestart, state, above_target_count
     TC_check_interface()
     npred()
     print("Turning on outpin")
     outpin.on()
     state = 'Heating'
+    above_target_count = 0
     statestart = time_minutes()
     notify(state)
 
 def kiln_step():
-    global degreesC, degreesF, minutes, state, statestart
+    global degreesC, degreesF, minutes, state, statestart, above_target_count
     global outpin
     gc.collect()
-    getTemperature()
+    sample_valid = getTemperature()
     gc.collect()
     minutes = time_minutes()
     if state == "Heating":
         npred()
-        if degreesC > targettemperature:
-            state = "Holding"
-            notify(state)
-            outpin.off()
-            statestart = minutes
+        if not sample_valid:
+            above_target_count = 0
+        elif degreesC > targettemperature:
+            above_target_count = above_target_count + 1
+            if above_target_count >= holding_entry_confirmations:
+                state = "Holding"
+                above_target_count = 0
+                notify(state)
+                outpin.off()
+                statestart = minutes
+        else:
+            above_target_count = 0
     elif state == "Holding":
+        above_target_count = 0
         if (minutes - statestart) >= holdminutes:
             state = "Cooling"
             statestart = minutes
@@ -294,7 +334,9 @@ def kiln_step():
             npgreen()
             outpin.on()
     elif state == "Cooling":
+        above_target_count = 0
         npblue()
+    publish_status(current_status())
     log_to_aio()
 
 def kiln():
@@ -313,7 +355,7 @@ def page():
     heating = 'On' if outpin.value() else 'Off'
     return '''<meta http-equiv="refresh" content="60">
         <form action="" method="POST" target='_blank'><div><font size="+2">''' +\
-        state + ' at ' + str(degreesC) + 'C for ' + str(time_minutes() - statestart) + ' minutes with heater ' + heating + \
+        current_status() + ' at ' + str(degreesC) + 'C for ' + str(time_minutes() - statestart) + ' minutes with heater ' + heating + \
         '''</font></div><br>
         <div><label for="targettemperature">Target Temperature C:</label>
         <input type="number" id="targettemperature" name="targettemperature" min="25" max="1000" value="''' +\
